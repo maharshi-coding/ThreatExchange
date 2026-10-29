@@ -5,10 +5,13 @@
 #include "downscaling.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <chrono>
+#include <stdexcept>
+#include <string>
 
 namespace facebook {
 namespace pdq {
@@ -19,6 +22,33 @@ namespace downscaling {
 static const float luma_from_R_coeff = 0.299;
 static const float luma_from_G_coeff = 0.587;
 static const float luma_from_B_coeff = 0.114;
+
+// ----------------------------------------------------------------
+// Guard against silent overflow in the row-major offset arithmetic below.
+// Every offset computed in this file is bounded by the product of a row-type
+// extent and a column-type extent (numRows*numCols, or vector_length*stride in
+// box1DFloat). Those offsets are evaluated in size_t, so if the product does
+// not fit in size_t it would itself wrap -- the same silent overflow, just at a
+// higher threshold -- and index out of bounds. On a 64-bit size_t the product
+// of two ints always fits, so this never triggers there; on a 32-bit size_t it
+// can, and we fail loudly instead of corrupting memory. Extents must also be
+// non-negative, since a negative value cast to size_t wraps to a huge offset.
+//
+// See facebook/ThreatExchange#1979. These are void routines with no error
+// channel, and std::runtime_error matches the error-reporting style used
+// elsewhere in pdq/cpp (e.g. common/pdqhashtypes.cpp).
+static void checkOffsetArithmetic(int rowExtent, int colExtent) {
+  if (rowExtent < 0 || colExtent < 0) {
+    throw std::runtime_error(
+        "pdq downscaling: negative dimension (" + std::to_string(rowExtent) +
+        " x " + std::to_string(colExtent) + ")");
+  }
+  if (rowExtent != 0 && (size_t)colExtent > SIZE_MAX / (size_t)rowExtent) {
+    throw std::runtime_error(
+        "pdq downscaling: dimensions " + std::to_string(rowExtent) + " x " +
+        std::to_string(colExtent) + " overflow size_t offset arithmetic");
+  }
+}
 
 // ----------------------------------------------------------------
 void fillFloatRGB(
@@ -33,6 +63,7 @@ void fillFloatRGB(
     float* pFloatG, // matrix as num_rows x num_cols in row-major order
     float* pFloatB // matrix as num_rows x num_cols in row-major order
 ) {
+  checkOffsetArithmetic(numRows, numCols);
   const uint8_t* pRrow = pRbase;
   const uint8_t* pGrow = pGbase;
   const uint8_t* pBrow = pBbase;
@@ -65,6 +96,7 @@ void fillFloatRGBFromGrey(
     float* pFloatG, // matrix as num_rows x num_cols in row-major order
     float* pFloatB // matrix as num_rows x num_cols in row-major order
 ) {
+  checkOffsetArithmetic(numRows, numCols);
   const uint8_t* prow = pbase;
   for (int i = 0; i < numRows; i++) {
     const uint8_t* p = prow;
@@ -90,6 +122,7 @@ void fillFloatLumaFromRGB(
     float* luma // matrix as num_rows x num_cols in
                 // row-major order
 ) {
+  checkOffsetArithmetic(numRows, numCols);
   const uint8_t* pRrow = pRbase;
   const uint8_t* pGrow = pGbase;
   const uint8_t* pBrow = pBbase;
@@ -121,6 +154,7 @@ void fillFloatLumaFromGrey(
     float* luma // matrix as num_rows x num_cols in
                 // row-major order
 ) {
+  checkOffsetArithmetic(numRows, numCols);
   const uint8_t* prow = pbase;
   for (int i = 0; i < numRows; i++) {
     const uint8_t* p = prow;
@@ -142,6 +176,8 @@ void decimateFloat(
                 // row-major order
     int outNumRows,
     int outNumCols) {
+  checkOffsetArithmetic(inNumRows, inNumCols);
+  checkOffsetArithmetic(outNumRows, outNumCols);
   // target centers not corners:
   for (int outi = 0; outi < outNumRows; outi++) {
     int ini = (int)(((outi + 0.5) * inNumRows) / outNumRows);
@@ -197,6 +233,7 @@ void scaleFloatRGB(
     float* scaledB, // matrix as num_rows x num_cols in row-major order
     int newNumRows,
     int newNumCols) {
+  checkOffsetArithmetic(oldNumRows, oldNumCols);
   if (newNumRows == oldNumRows && newNumCols == oldNumCols) {
     // E.g. for video-frame processing when we've already used ffmpeg
     // to downsample for us.
@@ -397,6 +434,7 @@ void box1DFloat(
     int vector_length,
     int stride,
     int full_window_size) {
+  checkOffsetArithmetic(vector_length, stride);
   int half_window_size = (full_window_size + 2) / 2; // 7->4, 8->5
 
   int phase_1_nreps = half_window_size - 1;
@@ -456,6 +494,7 @@ void boxAlongRowsFloat(
     int numRows,
     int numCols,
     int window_size) {
+  checkOffsetArithmetic(numRows, numCols);
   for (int i = 0; i < numRows; i++) {
     box1DFloat(
         &in[(size_t)i * numCols],

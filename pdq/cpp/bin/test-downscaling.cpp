@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 // ================================================================
@@ -15,12 +16,16 @@
 // facebook/ThreatExchange#1979 (signed-int overflow in box1DFloat /
 // boxAlongRowsFloat / decimateFloat index arithmetic).
 //
-// Two things are checked:
+// Three things are checked:
 //   (1) Behavior is preserved on normal/non-square inputs (the fix is a pure
 //       type widening with no algorithmic change).
 //   (2) The widened index arithmetic computes the correct, non-wrapping offset
 //       at magnitudes where the previous `int * int` form was UB. These are
 //       lightweight arithmetic checks -- they do NOT allocate multi-GB buffers.
+//   (3) The overflow guard rejects dimensions whose offset arithmetic would
+//       wrap size_t (reachable only where size_t is 32-bit) or that are
+//       negative, throwing std::runtime_error instead of indexing out of
+//       bounds.
 // ================================================================
 
 using namespace facebook::pdq::downscaling;
@@ -160,6 +165,43 @@ static void test_offset_boundary_arithmetic() {
 }
 
 // ----------------------------------------------------------------
+// The overflow guard: dimension arithmetic that would wrap size_t -- or a
+// negative dimension, which wraps to a huge offset when cast to size_t -- must
+// fail loudly with std::runtime_error rather than index out of bounds. A
+// genuine size_t-product overflow is only reachable where size_t is 32-bit (two
+// ints always fit in a 64-bit size_t), so the portable, allocation-free check
+// here is the negative-dimension path. The guard runs before any buffer is
+// touched, so null buffers are safe to pass.
+template <typename Fn>
+static void expect_throws(Fn fn, const char* msg) {
+  bool threw = false;
+  try {
+    fn();
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw, msg);
+}
+
+static void test_guard_rejects_bad_dimensions() {
+  expect_throws(
+      [] { decimateFloat(nullptr, -1, 4, nullptr, 2, 2); },
+      "decimateFloat should reject negative input dimension");
+  expect_throws(
+      [] { decimateFloat(nullptr, 4, 4, nullptr, -2, 2); },
+      "decimateFloat should reject negative output dimension");
+  expect_throws(
+      [] { box1DFloat(nullptr, nullptr, -5, 1, 7); },
+      "box1DFloat should reject negative vector_length");
+  expect_throws(
+      [] { boxAlongRowsFloat(nullptr, nullptr, -1, 4, 3); },
+      "boxAlongRowsFloat should reject negative numRows");
+  expect_throws(
+      [] { fillFloatLumaFromGrey(nullptr, -1, 4, 4, 1, nullptr); },
+      "fillFloatLumaFromGrey should reject negative numRows");
+}
+
+// ----------------------------------------------------------------
 int main() {
   printf("================================================================\n");
   printf("downscaling.cpp regression tests (ThreatExchange#1979)\n\n");
@@ -171,6 +213,7 @@ int main() {
   test_decimateFloat_nonsquare();
   test_fillFloatLumaFromGrey();
   test_offset_boundary_arithmetic();
+  test_guard_rejects_bad_dimensions();
 
   printf(
       "\n%s (%d failure%s)\n",
